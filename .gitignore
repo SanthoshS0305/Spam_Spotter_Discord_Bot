@@ -174,4 +174,4 @@ cython_debug/
 .pypirc
 
 # AWS Key
-demo.pem
+key.pem
