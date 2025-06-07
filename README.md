@@ -1,4 +1,4 @@
-# Discord Message Filter Bot
+# Spam Spotter Discord Bot
 
 A Discord bot that monitors messages, matches them against a dataset, and can delete matching messages with optional admin approval.
 
