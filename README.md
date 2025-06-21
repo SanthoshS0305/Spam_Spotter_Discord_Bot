@@ -8,6 +8,8 @@ A Discord bot that monitors messages, matches them against a dataset, and can de
 - Monitor Discord channels for matching messages
 - Delete matching messages automatically or with admin approval
 - Log deleted messages back to the dataset
+- Maintain separate dataset for rejected deletions
+- Content-based spam detection (ignores author information)
 - Configurable settings via environment variables
 - Admin commands for control and monitoring
 
@@ -23,8 +25,11 @@ A Discord bot that monitors messages, matches them against a dataset, and can de
 3. Create a `.env` file with the following variables:
    ```
    DISCORD_TOKEN=your_bot_token
-   DATASET_PATH=path/to/your/dataset.csv
-   ADMIN_CHANNEL_ID=your_admin_channel_id
+   DATASET_FILE=global_dataset.csv
+   REJECTED_DATASET_FILE=rejected_dataset.csv
+   COMMAND_PREFIX=?
+   FLAG_COMMAND=?flag
+   CONFIG_PATH=server_config.json
    ```
 4. Create your dataset CSV file with the following columns:
    - author_id
@@ -89,46 +94,13 @@ A Discord bot that monitors messages, matches them against a dataset, and can de
 The bot can be configured through environment variables in the `.env` file:
 
 - `DISCORD_TOKEN`: Your Discord bot token
-- `DATASET_PATH`: Path to your message dataset CSV file
-- `ADMIN_CHANNEL_ID`: ID of the channel for admin notifications
+- `DATASET_FILE`: Path to your message dataset CSV file
+- `REJECTED_DATASET_FILE`: Path to the rejected dataset CSV file
 - `COMMAND_PREFIX`: Bot command prefix (default: !)
+- `FLAG_COMMAND`: Command to flag a message
+- `CONFIG_PATH`: Path to the server configuration JSON file
 
 ## Docker Commands
 
 - **Build image:**
-  ```bash
-  docker build -t discord-spam-bot .
   ```
-
-- **Run container:**
-  ```bash
-  docker run -d --name discord-bot --restart unless-stopped --env-file .env discord-spam-bot
-  ```
-
-- **Stop container:**
-  ```bash
-  docker stop discord-bot
-  ```
-
-- **View logs:**
-  ```bash
-  docker logs -f discord-bot
-  ```
-
-- **Remove container:**
-  ```bash
-  docker rm discord-bot
-  ```
-
-- **Check container status:**
-  ```bash
-  docker ps
-  ```
-
-## Security
-
-- Never share your bot token
-- Keep your dataset file secure
-- Use appropriate Discord permissions for the bot
-- Keep your Docker images updated
-- Use environment variables for sensitive data

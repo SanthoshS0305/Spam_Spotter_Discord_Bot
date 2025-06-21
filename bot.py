@@ -30,6 +30,7 @@ load_dotenv()
 # Bot configuration
 TOKEN = os.getenv('DISCORD_TOKEN')
 DATASET_FILE = os.getenv('DATASET_FILE', 'global_dataset.csv')  # Global dataset file
+REJECTED_DATASET_FILE = os.getenv('REJECTED_DATASET_FILE', 'rejected_dataset.csv')  # Rejected deletions dataset
 COMMAND_PREFIX = os.getenv('COMMAND_PREFIX', '!')
 FLAG_COMMAND = os.getenv('FLAG_COMMAND', '!flag')
 CONFIG_PATH = os.getenv('CONFIG_PATH', 'server_config.json')
@@ -99,6 +100,7 @@ class ServerConfig:
 class MessageFilter:
     def __init__(self):
         self.dataset: Optional[pd.DataFrame] = None
+        self.rejected_dataset: Optional[pd.DataFrame] = None
         self.pending_deletions: Dict[str, Dict] = {}
         self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
         self.spam_patterns = []
@@ -112,75 +114,81 @@ class MessageFilter:
         """Get the path to the global dataset file."""
         return DATASET_FILE
 
+    def get_rejected_dataset_path(self) -> str:
+        """Get the path to the rejected dataset file."""
+        return REJECTED_DATASET_FILE
+
     def load_dataset(self):
-        """Load the global message dataset."""
+        """Load both the global message dataset and rejected dataset."""
+        # Load main dataset
         dataset_path = self.get_dataset_path()
         try:
             if os.path.exists(dataset_path):
                 self.dataset = pd.read_csv(dataset_path)
-                logger.info(f"Dataset loaded successfully with {len(self.dataset)} entries")
+                logger.info(f"Main dataset loaded successfully with {len(self.dataset)} entries")
             else:
                 # Create new dataset if it doesn't exist
                 self.dataset = pd.DataFrame(columns=[
-                    'author_id', 'content', 'timestamp', 'channel_id',
-                    'server_id', 'status', 'deletion_timestamp', 'author_join_days',
-                    'flagged_by', 'flag_reason'
+                    'content', 'timestamp', 'channel_id',
+                    'server_id', 'status', 'deletion_timestamp'
                 ])
                 self.save_dataset()
                 logger.info("Created new global dataset file")
         except Exception as e:
-            logger.error(f"Error loading dataset: {e}")
+            logger.error(f"Error loading main dataset: {e}")
             self.dataset = None
 
+        # Load rejected dataset
+        rejected_dataset_path = self.get_rejected_dataset_path()
+        try:
+            if os.path.exists(rejected_dataset_path):
+                self.rejected_dataset = pd.read_csv(rejected_dataset_path)
+                logger.info(f"Rejected dataset loaded successfully with {len(self.rejected_dataset)} entries")
+            else:
+                # Create new rejected dataset if it doesn't exist
+                self.rejected_dataset = pd.DataFrame(columns=[
+                    'content', 'timestamp', 'channel_id',
+                    'server_id', 'status', 'rejection_timestamp'
+                ])
+                self.save_rejected_dataset()
+                logger.info("Created new rejected dataset file")
+        except Exception as e:
+            logger.error(f"Error loading rejected dataset: {e}")
+            self.rejected_dataset = None
+
     def save_dataset(self):
-        """Save the current dataset."""
+        """Save the current main dataset."""
         if self.dataset is not None:
             try:
                 dataset_path = self.get_dataset_path()
                 self.dataset.to_csv(dataset_path, index=False)
-                logger.info("Dataset saved successfully")
+                logger.info("Main dataset saved successfully")
             except Exception as e:
-                logger.error(f"Error saving dataset: {e}")
+                logger.error(f"Error saving main dataset: {e}")
 
-    def calculate_join_time_weight(self, member: discord.Member) -> float:
-        """Calculate a weight based on how long the member has been in the server."""
-        join_time = member.joined_at
-        if not join_time:
-            return 1.0  # Default weight if join time is unknown
-        
-        days_in_server = (datetime.now(timezone.utc) - join_time).days
-        
-        if days_in_server < MIN_JOIN_TIME_DAYS:
-            # Higher weight for very new members
-            return 1.0
-        elif days_in_server > MAX_JOIN_TIME_DAYS:
-            # Lower weight for long-time members
-            return 0.3
-        else:
-            # Linear interpolation between 1.0 and 0.3
-            ratio = (days_in_server - MIN_JOIN_TIME_DAYS) / (MAX_JOIN_TIME_DAYS - MIN_JOIN_TIME_DAYS)
-            return 1.0 - (0.7 * ratio)
+    def save_rejected_dataset(self):
+        """Save the current rejected dataset."""
+        if self.rejected_dataset is not None:
+            try:
+                rejected_dataset_path = self.get_rejected_dataset_path()
+                self.rejected_dataset.to_csv(rejected_dataset_path, index=False)
+                logger.info("Rejected dataset saved successfully")
+            except Exception as e:
+                logger.error(f"Error saving rejected dataset: {e}")
 
     def add_message(self, message: discord.Message, status: str = "deleted", flagged_by: Optional[discord.Member] = None, flag_reason: Optional[str] = None):
-        """Add a deleted message to the global dataset and trigger training if needed."""
+        """Add a deleted message to the main dataset and trigger training if needed."""
         if self.dataset is None:
             self.load_dataset()
         
         if self.dataset is not None:
-            member = message.guild.get_member(message.author.id)
-            join_days = (datetime.now(timezone.utc) - member.joined_at).days if member and member.joined_at else None
-            
             new_entry = {
-                'author_id': message.author.id,
                 'content': message.content,
                 'timestamp': message.created_at.isoformat(),
                 'channel_id': message.channel.id,
                 'server_id': message.guild.id,
                 'status': status,
-                'deletion_timestamp': datetime.now(timezone.utc).isoformat(),
-                'author_join_days': join_days,
-                'flagged_by': flagged_by.id if flagged_by else None,
-                'flag_reason': flag_reason
+                'deletion_timestamp': datetime.now(timezone.utc).isoformat()
             }
             self.dataset = pd.concat([self.dataset, pd.DataFrame([new_entry])], ignore_index=True)
             self.save_dataset()
@@ -188,10 +196,27 @@ class MessageFilter:
             # Trigger training if needed
             self.train_from_dataset()
 
+    def add_rejected_message(self, message: discord.Message, status: str = "rejected"):
+        """Add a rejected message to the rejected dataset."""
+        if self.rejected_dataset is None:
+            self.load_dataset()
+        
+        if self.rejected_dataset is not None:
+            new_entry = {
+                'content': message.content,
+                'timestamp': message.created_at.isoformat(),
+                'channel_id': message.channel.id,
+                'server_id': message.guild.id,
+                'status': status,
+                'rejection_timestamp': datetime.now(timezone.utc).isoformat()
+            }
+            self.rejected_dataset = pd.concat([self.rejected_dataset, pd.DataFrame([new_entry])], ignore_index=True)
+            self.save_rejected_dataset()
+
     def train_from_dataset(self, force: bool = False):
-        """Train the filter using the existing dataset."""
+        """Train the filter using the existing datasets."""
         if self.dataset is None or self.dataset.empty:
-            logger.warning("No dataset available for training")
+            logger.warning("No main dataset available for training")
             return
 
         # Check if we need to retrain
@@ -199,7 +224,7 @@ class MessageFilter:
         if not force and self.trained and (current_size - self.last_training_size) < self.training_threshold:
             return
 
-        logger.info("Starting training from dataset...")
+        logger.info("Starting training from datasets...")
         
         # 1. Extract and learn spam patterns
         self._learn_spam_patterns()
@@ -212,10 +237,10 @@ class MessageFilter:
         
         self.trained = True
         self.last_training_size = current_size
-        logger.info(f"Training completed successfully. Dataset size: {current_size}")
+        logger.info(f"Training completed successfully. Main dataset size: {current_size}")
 
     def _learn_spam_patterns(self):
-        """Learn common spam patterns from the dataset."""
+        """Learn common spam patterns from the main dataset."""
         # Get all deleted messages
         deleted_messages = self.dataset[self.dataset['status'] == 'deleted']
         
@@ -249,14 +274,14 @@ class MessageFilter:
             if count / total_deleted > 0.1
         ]
         
-        logger.info(f"Learned {len(self.spam_patterns)} spam patterns from dataset")
+        logger.info(f"Learned {len(self.spam_patterns)} spam patterns from main dataset")
 
     def _calculate_thresholds(self):
-        """Calculate optimal thresholds based on the dataset."""
+        """Calculate optimal thresholds based on both datasets."""
         if self.dataset is None or self.dataset.empty:
             return
 
-        # Get all deleted messages
+        # Get all deleted messages from main dataset
         deleted_messages = self.dataset[self.dataset['status'] == 'deleted']
         
         if len(deleted_messages) < 2:
@@ -283,12 +308,12 @@ class MessageFilter:
             logger.info(f"Calculated fuzzy threshold: {self.fuzzy_threshold:.2f}")
 
     def _fine_tune_embeddings(self):
-        """Fine-tune the embedding model on the dataset."""
+        """Fine-tune the embedding model on both datasets."""
         if self.dataset is None or self.dataset.empty:
             return
 
         try:
-            # Get all deleted messages
+            # Get all deleted messages from main dataset
             deleted_messages = self.dataset[self.dataset['status'] == 'deleted']
             
             if len(deleted_messages) < 2:
@@ -510,6 +535,7 @@ async def on_message(message: discord.Message):
 
                     async def reject_callback(interaction: discord.Interaction):
                         if interaction.user.guild_permissions.administrator:
+                            message_filter.add_rejected_message(message)
                             await interaction.response.send_message("Deletion rejected.", ephemeral=True)
                         else:
                             await interaction.response.send_message("You don't have permission to reject deletions.", ephemeral=True)
@@ -559,19 +585,23 @@ async def status(ctx):
     admin_channel_id = server_config.get_admin_channel(ctx.guild.id)
     admin_channel = f"<#{admin_channel_id}>" if admin_channel_id else "Not set"
     
-    # Get dataset size for current server
-    dataset_size = 0
+    # Get dataset sizes
+    main_dataset_size = 0
+    rejected_dataset_size = 0
     if message_filter.dataset is not None:
-        dataset_size = len(message_filter.dataset)
+        main_dataset_size = len(message_filter.dataset)
+    if message_filter.rejected_dataset is not None:
+        rejected_dataset_size = len(message_filter.rejected_dataset)
     
     embed = discord.Embed(
         title="Bot Status",
         color=discord.Color.blue()
     )
     embed.add_field(name="Admin Approval", value="Enabled" if server_config.get_requires_approval(ctx.guild.id) else "Disabled")
-    embed.add_field(name="Dataset Size", value=dataset_size)
+    embed.add_field(name="Main Dataset Size", value=main_dataset_size)
+    embed.add_field(name="Rejected Dataset Size", value=rejected_dataset_size)
     embed.add_field(name="Admin Channel", value=admin_channel)
-    embed.add_field(name="Join Time Weighting", value=f"Enabled (Min: {MIN_JOIN_TIME_DAYS} days, Max: {MAX_JOIN_TIME_DAYS} days)")
+    embed.add_field(name="Detection Method", value="Content-based (no author consideration)")
     embed.add_field(name="Flag Command", value=f"Reply to a message with `{FLAG_COMMAND} [reason]` to flag it for deletion")
     await ctx.send(embed=embed)
 
