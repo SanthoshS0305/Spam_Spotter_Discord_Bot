@@ -13,6 +13,8 @@ A Discord bot that monitors messages, matches them against a dataset, and can de
 
 ## Setup
 
+### Option 1: Direct Installation
+
 1. Clone this repository
 2. Install dependencies:
    ```bash
@@ -32,11 +34,49 @@ A Discord bot that monitors messages, matches them against a dataset, and can de
    - server_id
    - status (optional)
 
+### Option 2: Docker Installation
+
+1. Install Docker on your system:
+   ```bash
+   # Ubuntu/Debian
+   sudo apt-get update
+   sudo apt-get install docker.io
+   sudo systemctl start docker
+   sudo usermod -aG docker $USER
+   # Log out and log back in for group changes to take effect
+   ```
+
+2. Build the Docker image:
+   ```bash
+   docker build -t discord-spam-bot .
+   ```
+
+3. Create a `.env` file with your configuration (same as above)
+
+4. Run the container:
+   ```bash
+   docker run -d \
+     --name discord-bot \
+     --restart unless-stopped \
+     --env-file .env \
+     discord-spam-bot
+   ```
+
+5. Check container status:
+   ```bash
+   docker ps
+   docker logs discord-bot
+   ```
+
 ## Usage
 
 1. Start the bot:
    ```bash
+   # Direct installation
    python bot.py
+
+   # Docker
+   docker start discord-bot
    ```
 
 2. Available Commands:
@@ -53,8 +93,42 @@ The bot can be configured through environment variables in the `.env` file:
 - `ADMIN_CHANNEL_ID`: ID of the channel for admin notifications
 - `COMMAND_PREFIX`: Bot command prefix (default: !)
 
+## Docker Commands
+
+- **Build image:**
+  ```bash
+  docker build -t discord-spam-bot .
+  ```
+
+- **Run container:**
+  ```bash
+  docker run -d --name discord-bot --restart unless-stopped --env-file .env discord-spam-bot
+  ```
+
+- **Stop container:**
+  ```bash
+  docker stop discord-bot
+  ```
+
+- **View logs:**
+  ```bash
+  docker logs -f discord-bot
+  ```
+
+- **Remove container:**
+  ```bash
+  docker rm discord-bot
+  ```
+
+- **Check container status:**
+  ```bash
+  docker ps
+  ```
+
 ## Security
 
 - Never share your bot token
 - Keep your dataset file secure
-- Use appropriate Discord permissions for the bot 
+- Use appropriate Discord permissions for the bot
+- Keep your Docker images updated
+- Use environment variables for sensitive data

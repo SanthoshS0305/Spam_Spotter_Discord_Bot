@@ -1,21 +1,34 @@
-FROM python:3.10-slim
+# Build stage
+FROM python:3.10-slim as builder
 
-# Set work directory
 WORKDIR /app
 
-# Install system dependencies (if needed)
-RUN apt-get update && apt-get install -y \
+# Install only essential build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install Python dependencies
+# Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of your code
-COPY . .
+# Final stage
+FROM python:3.10-slim
 
-# Set environment variables (optional, can also use .env file)
-# ENV DISCORD_TOKEN=your_token
+WORKDIR /app
+
+# Copy only necessary files from builder
+COPY --from=builder /usr/local/lib/python3.10/site-packages /usr/local/lib/python3.10/site-packages
+COPY bot.py .
+COPY server_config.json .
+
+# Clean up
+RUN apt-get clean && \
+    rm -rf /var/lib/apt/lists/* && \
+    rm -rf /tmp/* && \
+    rm -rf /var/tmp/*
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
 
 CMD ["python", "bot.py"]
