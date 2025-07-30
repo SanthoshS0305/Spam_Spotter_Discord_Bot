@@ -5,18 +5,18 @@ services:
     build: .
     container_name: discord-spam-bot
     restart: unless-stopped
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - DATASET_FILE=data/spam_dataset.csv
+      - COMMAND_PREFIX=!
+      - FLAG_COMMAND=!flag
+      - CONFIG_PATH=data/server_config.json
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-    environment:
-      - DISCORD_TOKEN=${DISCORD_TOKEN}
-      - DATASET_FILE=/app/data/global_dataset.csv
-      - REJECTED_DATASET_FILE=/app/data/rejected_dataset.csv
-      - CONFIG_PATH=/app/data/server_config.json
-    env_file:
-      - .env
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3" 
+    networks:
+      - bot-network
+
+networks:
+  bot-network:
+    driver: bridge 

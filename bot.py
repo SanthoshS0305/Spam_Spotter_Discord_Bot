@@ -528,10 +528,14 @@ async def on_message(message: discord.Message):
 
 @bot.command(name='setadmin')
 @commands.has_permissions(administrator=True)
-async def set_admin_channel(ctx, channel: discord.TextChannel):
+async def set_admin_channel(ctx, channel: discord.TextChannel = None):
     """Set the admin channel for the current server."""
+    if channel is None:
+        await ctx.send("❌ **Error**: Please specify a channel. Usage: `!setadmin #channel-name`")
+        return
+    
     server_config.set_admin_channel(ctx.guild.id, channel.id)
-    await ctx.send(f"Admin channel set to {channel.mention}")
+    await ctx.send(f"✅ Admin channel set to {channel.mention}")
 
 @bot.command(name='retrain')
 @commands.has_permissions(administrator=True)
