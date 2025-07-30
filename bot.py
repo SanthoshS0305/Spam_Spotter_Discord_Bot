@@ -207,6 +207,33 @@ class MessageFilter:
             self.save_dataset()
             self.train_model()
 
+    def clean_dataset(self):
+        """Clean the dataset by removing duplicate content entries."""
+        if self.dataset is None or self.dataset.empty:
+            return
+        
+        original_size = len(self.dataset)
+        
+        # Remove duplicates based on content field
+        if 'content' in self.dataset.columns:
+            self.dataset = self.dataset.drop_duplicates(subset=['content'], keep='first')
+        elif 'msg_content' in self.dataset.columns:
+            self.dataset = self.dataset.drop_duplicates(subset=['msg_content'], keep='first')
+        else:
+            # Try to find any content-like column
+            content_columns = [col for col in self.dataset.columns if 'content' in col.lower() or 'message' in col.lower() or 'text' in col.lower()]
+            if content_columns:
+                self.dataset = self.dataset.drop_duplicates(subset=[content_columns[0]], keep='first')
+        
+        cleaned_size = len(self.dataset)
+        removed_count = original_size - cleaned_size
+        
+        if removed_count > 0:
+            logger.info(f"Cleaned dataset: removed {removed_count} duplicate entries ({original_size} -> {cleaned_size})")
+            self.save_dataset()
+        else:
+            logger.info("Dataset is already clean (no duplicates found)")
+
     def _prepare_training_data(self):
         """Prepare training data from both internal and external datasets."""
         training_texts = []
@@ -240,6 +267,9 @@ class MessageFilter:
 
     def train_model(self):
         """Train the nearest neighbor model on spam messages."""
+        # Clean dataset first
+        self.clean_dataset()
+        
         training_texts = self._prepare_training_data()
         
         if len(training_texts) < 2:
@@ -509,6 +539,20 @@ async def retrain_model(ctx):
     """Retrain the spam detection model."""
     message_filter.train_model()
     await ctx.send("Spam detection model retrained successfully.")
+
+@bot.command(name='clean_dataset')
+@commands.has_permissions(administrator=True)
+async def clean_dataset(ctx):
+    """Clean the dataset by removing duplicate entries."""
+    original_size = len(message_filter.dataset) if message_filter.dataset is not None else 0
+    message_filter.clean_dataset()
+    cleaned_size = len(message_filter.dataset) if message_filter.dataset is not None else 0
+    removed_count = original_size - cleaned_size
+    
+    if removed_count > 0:
+        await ctx.send(f"Dataset cleaned: removed {removed_count} duplicate entries ({original_size} -> {cleaned_size})")
+    else:
+        await ctx.send("Dataset is already clean (no duplicates found)")
 
 @bot.command(name='toggle_approval')
 @commands.has_permissions(administrator=True)
