@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  discord-bot:
+    build: .
+    container_name: discord-spam-bot
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - DATASET_FILE=/app/data/global_dataset.csv
+      - REJECTED_DATASET_FILE=/app/data/rejected_dataset.csv
+      - CONFIG_PATH=/app/data/server_config.json
+    env_file:
+      - .env
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3" 

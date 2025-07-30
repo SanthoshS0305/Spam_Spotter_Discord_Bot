@@ -1,34 +1,32 @@
-# Build stage
-FROM python:3.10-slim as builder
-
-WORKDIR /app
-
-# Install only essential build dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Final stage
 FROM python:3.10-slim
 
+# Set working directory
 WORKDIR /app
 
-# Copy only necessary files from builder
-COPY --from=builder /usr/local/lib/python3.10/site-packages /usr/local/lib/python3.10/site-packages
-COPY bot.py .
-COPY server_config.json .
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
 
-# Clean up
-RUN apt-get clean && \
-    rm -rf /var/lib/apt/lists/* && \
-    rm -rf /tmp/* && \
-    rm -rf /var/tmp/*
+# Copy requirements first for better caching
+COPY requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application files
+COPY bot.py .
+COPY .env .
+
+# Create directories for data
+RUN mkdir -p /app/data
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 
+# Expose port (if needed for health checks)
+EXPOSE 8080
+
+# Run the bot
 CMD ["python", "bot.py"]

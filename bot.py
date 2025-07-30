@@ -3,10 +3,11 @@ import json
 import logging
 from datetime import datetime, timezone
 from typing import Optional, Dict, List, Tuple
-import re
 from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.neighbors import NearestNeighbors
 import numpy as np
+import requests
+from io import StringIO
 
 import discord
 from discord.ext import commands
@@ -29,15 +30,12 @@ load_dotenv()
 
 # Bot configuration
 TOKEN = os.getenv('DISCORD_TOKEN')
-DATASET_FILE = os.getenv('DATASET_FILE', 'global_dataset.csv')  # Global dataset file
-REJECTED_DATASET_FILE = os.getenv('REJECTED_DATASET_FILE', 'rejected_dataset.csv')  # Rejected deletions dataset
+DATASET_FILE = os.getenv('DATASET_FILE', 'global_dataset.csv')
+REJECTED_DATASET_FILE = os.getenv('REJECTED_DATASET_FILE', 'rejected_dataset.csv')
 COMMAND_PREFIX = os.getenv('COMMAND_PREFIX', '!')
 FLAG_COMMAND = os.getenv('FLAG_COMMAND', '!flag')
 CONFIG_PATH = os.getenv('CONFIG_PATH', 'server_config.json')
-
-# Time-based configuration
-MIN_JOIN_TIME_DAYS = 30  # Messages from members who joined less than this many days ago get higher weight
-MAX_JOIN_TIME_DAYS = 365  # Messages from members who joined more than this many days ago get lower weight
+EXTERNAL_DATASET_URL = "https://huggingface.co/datasets/wangyuancheng/discord-phishing-scam-clean/resolve/main/discord-phishing-scam-detection.csv"
 
 # Bot setup
 intents = discord.Intents.default()
@@ -101,83 +99,83 @@ class MessageFilter:
     def __init__(self):
         self.dataset: Optional[pd.DataFrame] = None
         self.rejected_dataset: Optional[pd.DataFrame] = None
-        self.pending_deletions: Dict[str, Dict] = {}
+        self.external_dataset: Optional[pd.DataFrame] = None
         self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-        self.spam_patterns = []
+        self.nearest_neighbor_model = None
         self.similarity_threshold = 0.8
-        self.fuzzy_threshold = 0.85
+        self.k_neighbors = 5
         self.trained = False
         self.last_training_size = 0
-        self.training_threshold = 10  # Retrain after this many new messages
+        self.training_threshold = 10
+        self._training_texts = []
+        self._training_embeddings = None
 
-    def get_dataset_path(self) -> str:
-        """Get the path to the global dataset file."""
-        return DATASET_FILE
-
-    def get_rejected_dataset_path(self) -> str:
-        """Get the path to the rejected dataset file."""
-        return REJECTED_DATASET_FILE
+    def load_external_dataset(self):
+        """Load the external phishing/scam dataset."""
+        try:
+            logger.info("Loading external dataset...")
+            response = requests.get(EXTERNAL_DATASET_URL, timeout=30)
+            response.raise_for_status()
+            
+            self.external_dataset = pd.read_csv(StringIO(response.text))
+            scam_count = len(self.external_dataset[self.external_dataset['label'] == 1])
+            logger.info(f"External dataset loaded: {scam_count} scam messages")
+            
+        except Exception as e:
+            logger.error(f"Error loading external dataset: {e}")
+            self.external_dataset = None
 
     def load_dataset(self):
-        """Load both the global message dataset and rejected dataset."""
+        """Load all datasets."""
         # Load main dataset
-        dataset_path = self.get_dataset_path()
         try:
-            if os.path.exists(dataset_path):
-                self.dataset = pd.read_csv(dataset_path)
-                logger.info(f"Main dataset loaded successfully with {len(self.dataset)} entries")
+            if os.path.exists(DATASET_FILE):
+                self.dataset = pd.read_csv(DATASET_FILE)
+                logger.info(f"Main dataset loaded: {len(self.dataset)} entries")
             else:
-                # Create new dataset if it doesn't exist
                 self.dataset = pd.DataFrame(columns=[
-                    'content', 'timestamp', 'channel_id',
-                    'server_id', 'status', 'deletion_timestamp'
+                    'content', 'timestamp', 'channel_id', 'server_id', 'status', 'deletion_timestamp'
                 ])
                 self.save_dataset()
-                logger.info("Created new global dataset file")
         except Exception as e:
             logger.error(f"Error loading main dataset: {e}")
             self.dataset = None
 
         # Load rejected dataset
-        rejected_dataset_path = self.get_rejected_dataset_path()
         try:
-            if os.path.exists(rejected_dataset_path):
-                self.rejected_dataset = pd.read_csv(rejected_dataset_path)
-                logger.info(f"Rejected dataset loaded successfully with {len(self.rejected_dataset)} entries")
+            if os.path.exists(REJECTED_DATASET_FILE):
+                self.rejected_dataset = pd.read_csv(REJECTED_DATASET_FILE)
+                logger.info(f"Rejected dataset loaded: {len(self.rejected_dataset)} entries")
             else:
-                # Create new rejected dataset if it doesn't exist
                 self.rejected_dataset = pd.DataFrame(columns=[
-                    'content', 'timestamp', 'channel_id',
-                    'server_id', 'status', 'rejection_timestamp'
+                    'content', 'timestamp', 'channel_id', 'server_id', 'status', 'rejection_timestamp'
                 ])
                 self.save_rejected_dataset()
-                logger.info("Created new rejected dataset file")
         except Exception as e:
             logger.error(f"Error loading rejected dataset: {e}")
             self.rejected_dataset = None
 
+        # Load external dataset
+        self.load_external_dataset()
+
     def save_dataset(self):
-        """Save the current main dataset."""
+        """Save the main dataset."""
         if self.dataset is not None:
             try:
-                dataset_path = self.get_dataset_path()
-                self.dataset.to_csv(dataset_path, index=False)
-                logger.info("Main dataset saved successfully")
+                self.dataset.to_csv(DATASET_FILE, index=False)
             except Exception as e:
                 logger.error(f"Error saving main dataset: {e}")
 
     def save_rejected_dataset(self):
-        """Save the current rejected dataset."""
+        """Save the rejected dataset."""
         if self.rejected_dataset is not None:
             try:
-                rejected_dataset_path = self.get_rejected_dataset_path()
-                self.rejected_dataset.to_csv(rejected_dataset_path, index=False)
-                logger.info("Rejected dataset saved successfully")
+                self.rejected_dataset.to_csv(REJECTED_DATASET_FILE, index=False)
             except Exception as e:
                 logger.error(f"Error saving rejected dataset: {e}")
 
-    def add_message(self, message: discord.Message, status: str = "deleted", flagged_by: Optional[discord.Member] = None, flag_reason: Optional[str] = None):
-        """Add a deleted message to the main dataset and trigger training if needed."""
+    def add_message(self, message: discord.Message, status: str = "deleted"):
+        """Add a deleted message to the dataset."""
         if self.dataset is None:
             self.load_dataset()
         
@@ -192,11 +190,9 @@ class MessageFilter:
             }
             self.dataset = pd.concat([self.dataset, pd.DataFrame([new_entry])], ignore_index=True)
             self.save_dataset()
-            
-            # Trigger training if needed
             self.train_from_dataset()
 
-    def add_rejected_message(self, message: discord.Message, status: str = "rejected"):
+    def add_rejected_message(self, message: discord.Message):
         """Add a rejected message to the rejected dataset."""
         if self.rejected_dataset is None:
             self.load_dataset()
@@ -207,194 +203,119 @@ class MessageFilter:
                 'timestamp': message.created_at.isoformat(),
                 'channel_id': message.channel.id,
                 'server_id': message.guild.id,
-                'status': status,
+                'status': 'rejected',
                 'rejection_timestamp': datetime.now(timezone.utc).isoformat()
             }
             self.rejected_dataset = pd.concat([self.rejected_dataset, pd.DataFrame([new_entry])], ignore_index=True)
             self.save_rejected_dataset()
 
+    def _prepare_training_data(self):
+        """Prepare training data from both datasets."""
+        # Get deleted messages from main dataset
+        deleted_messages = self.dataset[self.dataset['status'] == 'deleted'] if self.dataset is not None else pd.DataFrame()
+        internal_texts = deleted_messages['content'].astype(str).tolist() if len(deleted_messages) > 0 else []
+        
+        # Get scam messages from external dataset
+        external_scam_texts = []
+        if self.external_dataset is not None:
+            scam_messages = self.external_dataset[self.external_dataset['label'] == 1]
+            external_scam_texts = scam_messages['msg_content'].astype(str).tolist()
+        
+        return internal_texts + external_scam_texts
+
     def train_from_dataset(self, force: bool = False):
-        """Train the filter using the existing datasets."""
+        """Train the nearest neighbor model."""
         if self.dataset is None or self.dataset.empty:
-            logger.warning("No main dataset available for training")
             return
 
-        # Check if we need to retrain
         current_size = len(self.dataset)
         if not force and self.trained and (current_size - self.last_training_size) < self.training_threshold:
             return
 
-        logger.info("Starting training from datasets...")
+        logger.info("Training nearest neighbor model...")
         
-        # 1. Extract and learn spam patterns
-        self._learn_spam_patterns()
-        
-        # 2. Calculate optimal thresholds
-        self._calculate_thresholds()
-        
-        # 3. Fine-tune the embedding model
-        self._fine_tune_embeddings()
-        
-        self.trained = True
-        self.last_training_size = current_size
-        logger.info(f"Training completed successfully. Main dataset size: {current_size}")
-
-    def _learn_spam_patterns(self):
-        """Learn common spam patterns from the main dataset."""
-        # Get all deleted messages
-        deleted_messages = self.dataset[self.dataset['status'] == 'deleted']
-        
-        # Common spam indicators
-        spam_indicators = {
-            'links': r'https?://[^\s]+',
-            'discord_invites': r'discord\.gg/\w+',
-            'short_urls': r'(bit\.ly|tinyurl\.com|goo\.gl|t\.co)/\w+',
-            'common_spam_words': r'(free|giveaway|win|click|visit|join|subscribe|discord\.gg)',
-            'repeated_chars': r'(.)\1{3,}',  # 4 or more repeated characters
-            'excessive_caps': r'[A-Z]{5,}',  # 5 or more consecutive caps
-            'excessive_punctuation': r'[!?]{3,}',  # 3 or more consecutive ! or ?
-        }
-        
-        # Analyze patterns in deleted messages
-        pattern_scores = {pattern: 0 for pattern in spam_indicators.values()}
-        total_deleted = len(deleted_messages)
-        
-        if total_deleted == 0:
-            return
-
-        for _, row in deleted_messages.iterrows():
-            content = str(row['content']).lower()
-            for pattern in spam_indicators.values():
-                if re.search(pattern, content, re.IGNORECASE):
-                    pattern_scores[pattern] += 1
-        
-        # Select patterns that appear in more than 10% of deleted messages
-        self.spam_patterns = [
-            pattern for pattern, count in pattern_scores.items()
-            if count / total_deleted > 0.1
-        ]
-        
-        logger.info(f"Learned {len(self.spam_patterns)} spam patterns from main dataset")
-
-    def _calculate_thresholds(self):
-        """Calculate optimal thresholds based on both datasets."""
-        if self.dataset is None or self.dataset.empty:
-            return
-
-        # Get all deleted messages from main dataset
-        deleted_messages = self.dataset[self.dataset['status'] == 'deleted']
-        
-        if len(deleted_messages) < 2:
-            return
-
-        # Calculate similarity scores between deleted messages
-        similarities = []
-        from difflib import SequenceMatcher
-        
-        # Only compare recent messages for efficiency
-        recent_messages = deleted_messages.tail(100)  # Last 100 messages
-        
-        for i, row1 in recent_messages.iterrows():
-            for j, row2 in recent_messages.iterrows():
-                if i != j:
-                    ratio = SequenceMatcher(None, 
-                                         str(row1['content']).lower(), 
-                                         str(row2['content']).lower()).ratio()
-                    similarities.append(ratio)
-        
-        if similarities:
-            # Set threshold to 75th percentile of similarities
-            self.fuzzy_threshold = np.percentile(similarities, 75)
-            logger.info(f"Calculated fuzzy threshold: {self.fuzzy_threshold:.2f}")
-
-    def _fine_tune_embeddings(self):
-        """Fine-tune the embedding model on both datasets."""
-        if self.dataset is None or self.dataset.empty:
-            return
-
         try:
-            # Get all deleted messages from main dataset
-            deleted_messages = self.dataset[self.dataset['status'] == 'deleted']
+            training_texts = self._prepare_training_data()
             
-            if len(deleted_messages) < 2:
+            if len(training_texts) < 2:
+                logger.warning("Not enough training data")
                 return
 
-            # Only use recent messages for efficiency
-            recent_messages = deleted_messages.tail(100)  # Last 100 messages
-            
-            # Prepare training data
-            texts = recent_messages['content'].astype(str).tolist()
-            
             # Calculate embeddings
-            embeddings = self.embedding_model.encode(texts)
+            embeddings = self.embedding_model.encode(training_texts)
             
-            # Calculate average similarity between deleted messages
-            similarities = cosine_similarity(embeddings)
-            np.fill_diagonal(similarities, 0)  # Remove self-similarities
+            # Train model
+            self.nearest_neighbor_model = NearestNeighbors(
+                n_neighbors=min(self.k_neighbors, len(embeddings)),
+                metric='cosine',
+                algorithm='auto'
+            )
+            self.nearest_neighbor_model.fit(embeddings)
             
-            # Set threshold to 75th percentile of similarities
+            # Calculate threshold
+            similarities = np.dot(embeddings, embeddings.T)
+            np.fill_diagonal(similarities, 0)
             self.similarity_threshold = np.percentile(similarities.flatten(), 75)
-            logger.info(f"Calculated semantic similarity threshold: {self.similarity_threshold:.2f}")
+            
+            # Cache training data for faster inference
+            self._training_texts = training_texts
+            self._training_embeddings = embeddings
+            
+            self.trained = True
+            self.last_training_size = current_size
+            logger.info(f"Training completed: {len(training_texts)} samples")
             
         except Exception as e:
-            logger.error(f"Error fine-tuning embeddings: {e}")
+            logger.error(f"Training error: {e}")
 
     def find_matches(self, message: discord.Message) -> List[Tuple[Dict, float]]:
-        """Find matching messages using trained patterns and thresholds."""
-        if self.dataset is None:
-            self.load_dataset()
-        if self.dataset is None or self.dataset.empty:
+        """Find matching messages using nearest neighbor classification."""
+        if not self.trained or self.nearest_neighbor_model is None:
+            self.train_from_dataset()
+            if not self.trained:
+                return []
+
+        try:
+            # Encode message
+            message_embedding = self.embedding_model.encode([message.content])
+            
+            # Find nearest neighbors
+            distances, indices = self.nearest_neighbor_model.kneighbors(message_embedding)
+            
+            matches = []
+            for distance, idx in zip(distances[0], indices[0]):
+                similarity = 1 - distance
+                
+                if similarity > self.similarity_threshold:
+                    # Determine source and create match object
+                    if idx < len(self._training_texts) - (len(self.external_dataset[self.external_dataset['label'] == 1]) if self.external_dataset is not None else 0):
+                        # Internal dataset match
+                        deleted_messages = self.dataset[self.dataset['status'] == 'deleted']
+                        matched_message = deleted_messages.iloc[idx].to_dict()
+                        matched_message['source'] = 'internal'
+                    else:
+                        # External dataset match
+                        matched_message = {
+                            'content': self._training_texts[idx],
+                            'source': 'external',
+                            'label': 1
+                        }
+                    
+                    matches.append((matched_message, similarity))
+            
+            return sorted(matches, key=lambda x: x[1], reverse=True)
+            
+        except Exception as e:
+            logger.error(f"Error in matching: {e}")
             return []
 
-        # Train if not already trained or if dataset has grown significantly
-        self.train_from_dataset()
-
-        matches = []
-
-        # 1. Regex pattern matching using learned patterns
-        for pattern in self.spam_patterns:
-            if re.search(pattern, message.content, re.IGNORECASE):
-                for _, row in self.dataset.iterrows():
-                    if re.search(pattern, str(row['content']), re.IGNORECASE):
-                        matches.append((row.to_dict(), 1.0))
-
-        # 2. Fuzzy string matching with learned threshold
-        from difflib import SequenceMatcher
-        for _, row in self.dataset.iterrows():
-            ratio = SequenceMatcher(None, message.content.lower(), str(row['content']).lower()).ratio()
-            if ratio > self.fuzzy_threshold and message.content.strip() and str(row['content']).strip():
-                matches.append((row.to_dict(), ratio))
-
-        # 3. Semantic similarity with learned threshold
-        try:
-            msg_emb = self.embedding_model.encode([message.content])
-            dataset_contents = self.dataset['content'].astype(str).tolist()
-            dataset_embs = self.embedding_model.encode(dataset_contents)
-            sims = cosine_similarity(msg_emb, dataset_embs)[0]
-            for idx, sim in enumerate(sims):
-                if sim > self.similarity_threshold:
-                    matches.append((self.dataset.iloc[idx].to_dict(), sim))
-        except Exception as e:
-            logger.error(f"Error in semantic similarity: {e}")
-
-        # 4. Remove duplicates and sort by weight
-        seen = set()
-        unique_matches = []
-        for match, weight in matches:
-            key = (match['content'], match['server_id'])
-            if key not in seen:
-                unique_matches.append((match, weight))
-                seen.add(key)
-        unique_matches.sort(key=lambda x: x[1], reverse=True)
-        return unique_matches
-
-# Initialize message filter and server config
+# Initialize components
 message_filter = MessageFilter()
 server_config = ServerConfig()
 
 @bot.event
 async def on_ready():
-    """Called when the bot is ready and connected to Discord."""
+    """Called when the bot is ready."""
     logger.info(f'{bot.user} has connected to Discord!')
     try:
         synced = await bot.tree.sync()
@@ -406,33 +327,26 @@ async def on_ready():
 async def on_guild_join(guild: discord.Guild):
     """Called when the bot joins a new server."""
     logger.info(f"Joined new server: {guild.name}")
-    # Initialize default configuration for the new server
     if str(guild.id) not in server_config.config:
-        server_config.config[str(guild.id)] = {
-            'requires_approval': True
-        }
+        server_config.config[str(guild.id)] = {'requires_approval': True}
         server_config.save_config()
-    # Initialize dataset for the new server
     message_filter.load_dataset()
 
 @bot.event
 async def on_message(message: discord.Message):
     """Handle incoming messages."""
-    # Ignore messages from the bot itself
     if message.author == bot.user:
         return
 
-    # Process commands
     await bot.process_commands(message)
 
-    # Handle message replies for flagging
+    # Handle flagging
     if message.reference and message.reference.resolved:
         if message.content.lower().startswith(FLAG_COMMAND.lower()):
             if message.author.guild_permissions.administrator:
                 target_message = message.reference.resolved
                 flag_reason = message.content[len(FLAG_COMMAND):].strip()
                 
-                # Create confirmation embed
                 embed = discord.Embed(
                     title="Message Flagged for Deletion",
                     description="An administrator has flagged this message for deletion.",
@@ -445,7 +359,6 @@ async def on_message(message: discord.Message):
                 if flag_reason:
                     embed.add_field(name="Reason", value=flag_reason)
                 
-                # Add confirmation buttons
                 view = discord.ui.View()
                 confirm_button = discord.ui.Button(label="Confirm Delete", style=discord.ButtonStyle.danger)
                 cancel_button = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.secondary)
@@ -454,14 +367,9 @@ async def on_message(message: discord.Message):
                     if interaction.user.guild_permissions.administrator:
                         try:
                             await target_message.delete()
-                            message_filter.add_message(
-                                target_message,
-                                status="deleted",
-                                flagged_by=message.author,
-                                flag_reason=flag_reason
-                            )
+                            message_filter.add_message(target_message)
                             await interaction.response.send_message("Message deleted successfully.", ephemeral=True)
-                            await message.delete()  # Delete the flag command message
+                            await message.delete()
                         except Exception as e:
                             await interaction.response.send_message(f"Error deleting message: {e}", ephemeral=True)
                     else:
@@ -470,7 +378,7 @@ async def on_message(message: discord.Message):
                 async def cancel_callback(interaction: discord.Interaction):
                     if interaction.user.guild_permissions.administrator:
                         await interaction.response.send_message("Deletion cancelled.", ephemeral=True)
-                        await message.delete()  # Delete the flag command message
+                        await message.delete()
                     else:
                         await interaction.response.send_message("You don't have permission to cancel deletions.", ephemeral=True)
 
@@ -479,7 +387,6 @@ async def on_message(message: discord.Message):
                 view.add_item(confirm_button)
                 view.add_item(cancel_button)
 
-                # Send confirmation to admin channel or current channel
                 admin_channel_id = server_config.get_admin_channel(message.guild.id)
                 if admin_channel_id:
                     admin_channel = bot.get_channel(admin_channel_id)
@@ -489,35 +396,31 @@ async def on_message(message: discord.Message):
                 await message.channel.send(embed=embed, view=view)
                 return
 
-    # Check for matching messages
+    # Check for content-based matches
     matches = message_filter.find_matches(message)
     if matches:
-        # Sort matches by weight (highest weight first)
-        matches.sort(key=lambda x: x[1], reverse=True)
-        match, weight = matches[0]  # Get the highest weighted match
+        match, similarity = matches[0]
         
         if server_config.get_requires_approval(message.guild.id):
-            # Send to admin channel for approval
             admin_channel_id = server_config.get_admin_channel(message.guild.id)
             if admin_channel_id:
                 admin_channel = bot.get_channel(admin_channel_id)
                 if admin_channel:
-                    member = message.guild.get_member(message.author.id)
-                    join_days = (datetime.now(timezone.utc) - member.joined_at).days if member and member.joined_at else "Unknown"
+                    match_source = match.get('source', 'internal') if isinstance(match, dict) else 'internal'
+                    source_display = "External Dataset" if match_source == 'external' else "Internal Dataset"
                     
                     embed = discord.Embed(
-                        title="Message Match Found",
-                        description="A message matching the dataset was found.",
+                        title="Potential Spam Detected",
+                        description="A message similar to previously deleted content was found.",
                         color=discord.Color.yellow()
                     )
                     embed.add_field(name="Author", value=message.author.mention)
                     embed.add_field(name="Channel", value=message.channel.mention)
                     embed.add_field(name="Content", value=message.content)
                     embed.add_field(name="Message Link", value=message.jump_url)
-                    embed.add_field(name="Author Join Time", value=f"{join_days} days")
-                    embed.add_field(name="Match Weight", value=f"{weight:.2f}")
+                    embed.add_field(name="Similarity Score", value=f"{similarity:.3f}")
+                    embed.add_field(name="Match Source", value=source_display)
 
-                    # Add approval buttons
                     view = discord.ui.View()
                     approve_button = discord.ui.Button(label="Approve", style=discord.ButtonStyle.green)
                     reject_button = discord.ui.Button(label="Reject", style=discord.ButtonStyle.red)
@@ -547,11 +450,10 @@ async def on_message(message: discord.Message):
 
                     await admin_channel.send(embed=embed, view=view)
         else:
-            # Delete immediately if approval not required
             try:
                 await message.delete()
                 message_filter.add_message(message)
-                logger.info(f"Deleted message from {message.author} in {message.channel} (weight: {weight:.2f})")
+                logger.info(f"Deleted message from {message.author} (similarity: {similarity:.3f})")
             except Exception as e:
                 logger.error(f"Error deleting message: {e}")
 
@@ -565,14 +467,14 @@ async def set_admin_channel(ctx, channel: discord.TextChannel):
 @bot.command(name='load_dataset')
 @commands.has_permissions(administrator=True)
 async def load_dataset(ctx):
-    """Reload the message dataset for the current server."""
+    """Reload the message dataset."""
     message_filter.load_dataset()
     await ctx.send("Dataset reloaded successfully.")
 
 @bot.command(name='toggle_approval')
 @commands.has_permissions(administrator=True)
 async def toggle_approval(ctx):
-    """Toggle the admin approval requirement for the current server."""
+    """Toggle the admin approval requirement."""
     current = server_config.get_requires_approval(ctx.guild.id)
     server_config.set_requires_approval(ctx.guild.id, not current)
     status = "enabled" if not current else "disabled"
@@ -581,27 +483,23 @@ async def toggle_approval(ctx):
 @bot.command(name='status')
 @commands.has_permissions(administrator=True)
 async def status(ctx):
-    """Display the current bot status for the server."""
+    """Display the current bot status."""
     admin_channel_id = server_config.get_admin_channel(ctx.guild.id)
     admin_channel = f"<#{admin_channel_id}>" if admin_channel_id else "Not set"
     
-    # Get dataset sizes
-    main_dataset_size = 0
-    rejected_dataset_size = 0
-    if message_filter.dataset is not None:
-        main_dataset_size = len(message_filter.dataset)
-    if message_filter.rejected_dataset is not None:
-        rejected_dataset_size = len(message_filter.rejected_dataset)
+    main_size = len(message_filter.dataset) if message_filter.dataset is not None else 0
+    rejected_size = len(message_filter.rejected_dataset) if message_filter.rejected_dataset is not None else 0
+    external_size = len(message_filter.external_dataset) if message_filter.external_dataset is not None else 0
     
-    embed = discord.Embed(
-        title="Bot Status",
-        color=discord.Color.blue()
-    )
+    embed = discord.Embed(title="Bot Status", color=discord.Color.blue())
     embed.add_field(name="Admin Approval", value="Enabled" if server_config.get_requires_approval(ctx.guild.id) else "Disabled")
-    embed.add_field(name="Main Dataset Size", value=main_dataset_size)
-    embed.add_field(name="Rejected Dataset Size", value=rejected_dataset_size)
+    embed.add_field(name="Main Dataset Size", value=main_size)
+    embed.add_field(name="Rejected Dataset Size", value=rejected_size)
+    embed.add_field(name="External Dataset Size", value=external_size)
     embed.add_field(name="Admin Channel", value=admin_channel)
-    embed.add_field(name="Detection Method", value="Content-based (no author consideration)")
+    embed.add_field(name="Detection Method", value="Content-based (Nearest Neighbor)")
+    embed.add_field(name="Similarity Threshold", value=f"{message_filter.similarity_threshold:.3f}")
+    embed.add_field(name="K Neighbors", value=message_filter.k_neighbors)
     embed.add_field(name="Flag Command", value=f"Reply to a message with `{FLAG_COMMAND} [reason]` to flag it for deletion")
     await ctx.send(embed=embed)
 

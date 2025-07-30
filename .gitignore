@@ -175,3 +175,6 @@ cython_debug/
 
 # AWS Key
 *.pem
+
+# Spam domains dataset
+spam_domains.json
