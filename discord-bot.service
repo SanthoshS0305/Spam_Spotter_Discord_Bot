@@ -5,9 +5,9 @@ After=network.target
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/home/ubuntu/discord_spam_bot
-Environment=PATH=/home/ubuntu/discord_spam_bot/venv/bin
-ExecStart=/home/ubuntu/discord_spam_bot/venv/bin/python bot.py
+WorkingDirectory=/home/ubuntu/Spam_Spotter_Discord_Bot
+Environment=PATH=/home/ubuntu/Spam_Spotter_Discord_Bot/venv/bin
+ExecStart=/home/ubuntu/Spam_Spotter_Discord_Bot/venv/bin/python bot.py
 Restart=always
 RestartSec=10
 
