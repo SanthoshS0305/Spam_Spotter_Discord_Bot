@@ -94,13 +94,35 @@ class ServerConfig:
         self.config[str(guild_id)]['requires_approval'] = requires_approval
         self.save_config()
 
+    def get_auto_ban(self, guild_id: int) -> bool:
+        """Get whether to automatically ban spam users."""
+        return self.config.get(str(guild_id), {}).get('auto_ban', False)
+
+    def set_auto_ban(self, guild_id: int, auto_ban: bool):
+        """Set whether to automatically ban spam users."""
+        if str(guild_id) not in self.config:
+            self.config[str(guild_id)] = {}
+        self.config[str(guild_id)]['auto_ban'] = auto_ban
+        self.save_config()
+
+    def get_ban_reason(self, guild_id: int) -> str:
+        """Get the ban reason for spam users."""
+        return self.config.get(str(guild_id), {}).get('ban_reason', 'Spam detected by bot')
+
+    def set_ban_reason(self, guild_id: int, reason: str):
+        """Set the ban reason for spam users."""
+        if str(guild_id) not in self.config:
+            self.config[str(guild_id)] = {}
+        self.config[str(guild_id)]['ban_reason'] = reason
+        self.save_config()
+
 class MessageFilter:
     def __init__(self):
         self.dataset: Optional[pd.DataFrame] = None
         self.external_dataset: Optional[pd.DataFrame] = None
         self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
         self.nearest_neighbor_model = None
-        self.similarity_threshold = 0.75  # Lower threshold for more sensitive detection
+        self.similarity_threshold = 0.7  # Lower threshold for more sensitive detection
         self.k_neighbors = 3
         self.trained = False
         self._training_texts = []
@@ -328,6 +350,7 @@ async def on_message(message: discord.Message):
                 
                 view = discord.ui.View()
                 confirm_button = discord.ui.Button(label="Confirm Delete", style=discord.ButtonStyle.danger)
+                ban_button = discord.ui.Button(label="Delete & Ban User", style=discord.ButtonStyle.danger)
                 cancel_button = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.secondary)
 
                 async def confirm_callback(interaction: discord.Interaction):
@@ -342,6 +365,24 @@ async def on_message(message: discord.Message):
                     else:
                         await interaction.response.send_message("You don't have permission to delete messages.", ephemeral=True)
 
+                async def ban_callback(interaction: discord.Interaction):
+                    if interaction.user.guild_permissions.administrator:
+                        try:
+                            # Delete the message first
+                            await target_message.delete()
+                            message_filter.add_spam_message(target_message)
+                            
+                            # Ban the user
+                            ban_reason = server_config.get_ban_reason(target_message.guild.id)
+                            await target_message.author.ban(reason=ban_reason)
+                            
+                            await interaction.response.send_message(f"Message deleted and user {target_message.author.mention} has been banned for spam.", ephemeral=True)
+                            await message.delete()
+                        except Exception as e:
+                            await interaction.response.send_message(f"Error banning user: {e}", ephemeral=True)
+                    else:
+                        await interaction.response.send_message("You don't have permission to ban users.", ephemeral=True)
+
                 async def cancel_callback(interaction: discord.Interaction):
                     if interaction.user.guild_permissions.administrator:
                         await interaction.response.send_message("Deletion cancelled.", ephemeral=True)
@@ -350,8 +391,10 @@ async def on_message(message: discord.Message):
                         await interaction.response.send_message("You don't have permission to cancel deletions.", ephemeral=True)
 
                 confirm_button.callback = confirm_callback
+                ban_button.callback = ban_callback
                 cancel_button.callback = cancel_callback
                 view.add_item(confirm_button)
+                view.add_item(ban_button)
                 view.add_item(cancel_button)
 
                 admin_channel_id = server_config.get_admin_channel(message.guild.id)
@@ -386,10 +429,11 @@ async def on_message(message: discord.Message):
                         embed.add_field(name="Matched Spam", value=matched_text[:100] + "..." if len(matched_text) > 100 else matched_text)
 
                     view = discord.ui.View()
-                    approve_button = discord.ui.Button(label="Delete as Spam", style=discord.ButtonStyle.danger)
-                    reject_button = discord.ui.Button(label="Allow Message", style=discord.ButtonStyle.green)
+                    delete_button = discord.ui.Button(label="Delete Message", style=discord.ButtonStyle.danger)
+                    ban_button = discord.ui.Button(label="Delete & Ban User", style=discord.ButtonStyle.danger)
+                    allow_button = discord.ui.Button(label="Allow Message", style=discord.ButtonStyle.green)
 
-                    async def approve_callback(interaction: discord.Interaction):
+                    async def delete_callback(interaction: discord.Interaction):
                         if interaction.user.guild_permissions.administrator:
                             try:
                                 await message.delete()
@@ -400,23 +444,55 @@ async def on_message(message: discord.Message):
                         else:
                             await interaction.response.send_message("You don't have permission to delete messages.", ephemeral=True)
 
-                    async def reject_callback(interaction: discord.Interaction):
+                    async def ban_callback(interaction: discord.Interaction):
+                        if interaction.user.guild_permissions.administrator:
+                            try:
+                                # Delete the message first
+                                await message.delete()
+                                message_filter.add_spam_message(message)
+                                
+                                # Ban the user
+                                ban_reason = server_config.get_ban_reason(message.guild.id)
+                                await message.author.ban(reason=ban_reason)
+                                
+                                await interaction.response.send_message(f"Message deleted and user {message.author.mention} has been banned for spam.", ephemeral=True)
+                            except Exception as e:
+                                await interaction.response.send_message(f"Error banning user: {e}", ephemeral=True)
+                        else:
+                            await interaction.response.send_message("You don't have permission to ban users.", ephemeral=True)
+
+                    async def allow_callback(interaction: discord.Interaction):
                         if interaction.user.guild_permissions.administrator:
                             await interaction.response.send_message("Message allowed to remain.", ephemeral=True)
                         else:
                             await interaction.response.send_message("You don't have permission to allow messages.", ephemeral=True)
 
-                    approve_button.callback = approve_callback
-                    reject_button.callback = reject_callback
-                    view.add_item(approve_button)
-                    view.add_item(reject_button)
+                    delete_button.callback = delete_callback
+                    ban_button.callback = ban_callback
+                    allow_button.callback = allow_callback
+                    view.add_item(delete_button)
+                    view.add_item(ban_button)
+                    view.add_item(allow_button)
 
                     await admin_channel.send(embed=embed, view=view)
         else:
             try:
+                # Auto-delete message
                 await message.delete()
                 message_filter.add_spam_message(message)
-                logger.info(f"Deleted spam message from {message.author} (similarity: {similarity:.3f})")
+                
+                # Auto-ban if enabled
+                if server_config.get_auto_ban(message.guild.id):
+                    try:
+                        ban_reason = server_config.get_ban_reason(message.guild.id)
+                        await message.author.ban(reason=ban_reason)
+                        logger.info(f"Deleted spam message and banned user {message.author} (similarity: {similarity:.3f})")
+                    except Exception as e:
+                        logger.error(f"Error banning user {message.author}: {e}")
+                        logger.info(f"Deleted spam message from {message.author} (similarity: {similarity:.3f})")
+                else:
+                    logger.info(f"Deleted spam message from {message.author} (similarity: {similarity:.3f})")
+                    
             except Exception as e:
                 logger.error(f"Error deleting spam message: {e}")
 
@@ -443,6 +519,43 @@ async def toggle_approval(ctx):
     status = "enabled" if not current else "disabled"
     await ctx.send(f"Admin approval requirement {status}.")
 
+@bot.command(name='toggle_auto_ban')
+@commands.has_permissions(administrator=True)
+async def toggle_auto_ban(ctx):
+    """Toggle automatic banning of spam users."""
+    current = server_config.get_auto_ban(ctx.guild.id)
+    server_config.set_auto_ban(ctx.guild.id, not current)
+    status = "enabled" if not current else "disabled"
+    await ctx.send(f"Auto-ban for spam users {status}.")
+
+@bot.command(name='set_ban_reason')
+@commands.has_permissions(administrator=True)
+async def set_ban_reason(ctx, *, reason: str):
+    """Set the ban reason for spam users."""
+    server_config.set_ban_reason(ctx.guild.id, reason)
+    await ctx.send(f"Ban reason set to: {reason}")
+
+@bot.command(name='ban_user')
+@commands.has_permissions(ban_members=True)
+async def ban_user(ctx, user: discord.Member, *, reason: str = "Spam detected"):
+    """Manually ban a user for spam."""
+    try:
+        await user.ban(reason=reason)
+        await ctx.send(f"User {user.mention} has been banned for: {reason}")
+    except Exception as e:
+        await ctx.send(f"Error banning user: {e}")
+
+@bot.command(name='unban_user')
+@commands.has_permissions(ban_members=True)
+async def unban_user(ctx, user_id: int):
+    """Unban a user by their ID."""
+    try:
+        user = await bot.fetch_user(user_id)
+        await ctx.guild.unban(user)
+        await ctx.send(f"User {user.mention} has been unbanned.")
+    except Exception as e:
+        await ctx.send(f"Error unbanning user: {e}")
+
 @bot.command(name='status')
 @commands.has_permissions(administrator=True)
 async def status(ctx):
@@ -456,6 +569,8 @@ async def status(ctx):
     
     embed = discord.Embed(title="Spam Detection Bot Status", color=discord.Color.blue())
     embed.add_field(name="Admin Approval", value="Enabled" if server_config.get_requires_approval(ctx.guild.id) else "Disabled")
+    embed.add_field(name="Auto-Ban", value="Enabled" if server_config.get_auto_ban(ctx.guild.id) else "Disabled")
+    embed.add_field(name="Ban Reason", value=server_config.get_ban_reason(ctx.guild.id))
     embed.add_field(name="Internal Dataset Size", value=dataset_size)
     embed.add_field(name="External Dataset Size", value=external_size)
     embed.add_field(name="External Scam Messages", value=external_scam_count)
@@ -465,6 +580,7 @@ async def status(ctx):
     embed.add_field(name="K Neighbors", value=message_filter.k_neighbors)
     embed.add_field(name="Model Trained", value="Yes" if message_filter.trained else "No")
     embed.add_field(name="Flag Command", value=f"Reply to a message with `{FLAG_COMMAND} [reason]` to flag it as spam")
+    embed.add_field(name="Commands", value="`!setadmin`, `!toggle_approval`, `!toggle_auto_ban`, `!set_ban_reason`, `!ban_user`, `!unban_user`, `!retrain`, `!status`")
     await ctx.send(embed=embed)
 
 # Run the bot
