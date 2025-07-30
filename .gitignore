@@ -37,6 +37,7 @@ ENV/
 
 # Datasets and data files
 *.csv
+!global_dataset.csv
 *.json
 data/
 datasets/
