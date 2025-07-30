@@ -30,7 +30,7 @@ load_dotenv()
 
 # Bot configuration
 TOKEN = os.getenv('DISCORD_TOKEN')
-DATASET_FILE = os.getenv('DATASET_FILE', 'spam_dataset.csv')
+DATASET_FILE = os.getenv('DATASET_FILE', 'global_dataset.csv')
 COMMAND_PREFIX = os.getenv('COMMAND_PREFIX', '!')
 FLAG_COMMAND = os.getenv('FLAG_COMMAND', '!flag')
 CONFIG_PATH = os.getenv('CONFIG_PATH', 'server_config.json')
@@ -156,13 +156,31 @@ class MessageFilter:
             self.load_dataset()
         
         if self.dataset is not None:
-            new_entry = {
-                'content': message.content,
-                'timestamp': message.created_at.isoformat(),
-                'channel_id': message.channel.id,
-                'server_id': message.guild.id,
-                'deletion_timestamp': datetime.now(timezone.utc).isoformat()
-            }
+            # Handle different dataset formats
+            if 'content' in self.dataset.columns:
+                # Standard format
+                new_entry = {
+                    'content': message.content,
+                    'timestamp': message.created_at.isoformat(),
+                    'channel_id': message.channel.id,
+                    'server_id': message.guild.id,
+                    'deletion_timestamp': datetime.now(timezone.utc).isoformat()
+                }
+            else:
+                # Global dataset format
+                new_entry = {
+                    'author_id': message.author.id,
+                    'content': message.content,
+                    'timestamp': message.created_at.isoformat(),
+                    'channel_id': message.channel.id,
+                    'server_id': message.guild.id,
+                    'status': 'deleted',
+                    'deletion_timestamp': datetime.now(timezone.utc).isoformat(),
+                    'author_join_days': (datetime.now(timezone.utc) - message.author.joined_at).days if message.author.joined_at else 0,
+                    'flagged_by': '',
+                    'flag_reason': ''
+                }
+            
             self.dataset = pd.concat([self.dataset, pd.DataFrame([new_entry])], ignore_index=True)
             self.save_dataset()
             self.train_model()
@@ -173,7 +191,19 @@ class MessageFilter:
         
         # Get spam messages from internal dataset
         if self.dataset is not None and len(self.dataset) > 0:
-            internal_texts = self.dataset['content'].astype(str).tolist()
+            # Handle different column names in global_dataset.csv
+            if 'content' in self.dataset.columns:
+                internal_texts = self.dataset['content'].astype(str).tolist()
+            elif 'msg_content' in self.dataset.columns:
+                internal_texts = self.dataset['msg_content'].astype(str).tolist()
+            else:
+                # Try to find any column that might contain text
+                text_columns = [col for col in self.dataset.columns if 'content' in col.lower() or 'message' in col.lower() or 'text' in col.lower()]
+                if text_columns:
+                    internal_texts = self.dataset[text_columns[0]].astype(str).tolist()
+                else:
+                    internal_texts = []
+            
             training_texts.extend(internal_texts)
             logger.info(f"Added {len(internal_texts)} internal spam messages to training data")
         
