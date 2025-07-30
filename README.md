@@ -1,257 +1,111 @@
-# Discord Spam Bot
+# Discord Spam Detection Bot
 
-An intelligent Discord bot that uses machine learning to detect and prevent spam messages. Features include content-based detection using nearest neighbor classification and admin approval workflows.
+A Discord bot that uses nearest neighbor classification to detect and filter spam messages based on content similarity. The bot trains on both internal flagged messages and an external dataset of known scam messages.
 
 ## Features
 
-- **Content-Based Detection**: Uses nearest neighbor classification to identify spam based on message content
-- **External Dataset Integration**: Trained on both internal deleted messages and external scam datasets
-- **Admin Approval System**: Configurable approval workflows for message deletion
-- **Multi-Server Support**: Handles multiple Discord servers with separate configurations
-- **Real-time Monitoring**: Comprehensive logging and status reporting
+- **Content-based Spam Detection**: Uses sentence embeddings and nearest neighbor classification to identify spam messages
+- **Hybrid Training**: Combines internal flagged messages with external scam dataset for better detection
+- **Learning System**: Automatically learns from flagged/deleted messages to improve detection
+- **Admin Approval**: Optional admin approval system for detected spam messages
+- **Manual Flagging**: Administrators can manually flag messages as spam
+- **Configurable**: Adjustable similarity thresholds and detection parameters
 
-## Quick Start (Local Development)
+## How It Works
 
-1. **Clone the repository**
-   ```bash
-   git clone <your-repo-url>
-   cd discord_spam_bot
-   ```
+1. **Message Processing**: When a message is sent, the bot converts it to a vector embedding using the SentenceTransformer model
+2. **Similarity Check**: The bot compares the message embedding with all known spam messages from both internal and external datasets
+3. **Nearest Neighbor**: Uses k-nearest neighbors (k=3) with cosine similarity to find the most similar spam messages
+4. **Threshold Decision**: If the similarity score exceeds the threshold (0.75), the message is flagged as potential spam
+5. **Action**: Depending on server settings, the message is either deleted automatically or sent for admin approval
 
-2. **Install dependencies**
+## Training Data
+
+The bot uses two sources of training data:
+
+1. **Internal Dataset**: Messages flagged as spam by administrators in your Discord server
+2. **External Dataset**: Hugging Face dataset containing known phishing and scam messages
+   - Source: `wangyuancheng/discord-phishing-scam-clean`
+   - Contains messages labeled as scam (1) or not scam (0)
+   - Automatically loaded on bot startup
+
+## Setup
+
+1. **Install Dependencies**:
    ```bash
    pip install -r requirements.txt
    ```
 
-3. **Set up environment variables**
-   ```bash
-   cp env.example .env
-   # Edit .env and add your Discord bot token
+2. **Environment Variables**:
+   Create a `.env` file with:
+   ```
+   DISCORD_TOKEN=your_discord_bot_token
+   DATASET_FILE=spam_dataset.csv
+   COMMAND_PREFIX=!
+   FLAG_COMMAND=!flag
+   CONFIG_PATH=server_config.json
    ```
 
-4. **Run the bot**
+3. **Run the Bot**:
    ```bash
    python bot.py
    ```
 
-## EC2 Deployment Guide
+## Commands
 
-### Prerequisites
-
-- AWS EC2 instance (Ubuntu 20.04+ recommended)
-- Discord bot token
-- SSH access to your EC2 instance
-
-### Step 1: Launch EC2 Instance
-
-1. **Launch an EC2 instance**:
-   - **AMI**: Ubuntu Server 20.04 LTS
-   - **Instance Type**: t3.medium or larger (recommended for ML workloads)
-   - **Storage**: At least 20GB
-   - **Security Group**: Allow SSH (port 22) and HTTP (port 80) if needed
-
-2. **Connect to your instance**:
-   ```bash
-   ssh -i your-key.pem ubuntu@your-ec2-ip
-   ```
-
-### Step 2: Deploy the Bot
-
-1. **Upload your bot files**:
-   ```bash
-   # From your local machine
-   scp -r . ubuntu@your-ec2-ip:~/discord-bot/
-   ```
-
-2. **SSH into your EC2 instance**:
-   ```bash
-   ssh -i your-key.pem ubuntu@your-ec2-ip
-   ```
-
-3. **Run the deployment script**:
-   ```bash
-   cd ~/discord-bot
-   chmod +x deploy.sh
-   ./deploy.sh
-   ```
-
-4. **Configure the bot**:
-   ```bash
-   nano .env
-   # Add your Discord bot token
-   ```
-
-5. **Start the bot**:
-   ```bash
-   docker-compose up -d
-   ```
-
-### Step 3: Verify Deployment
-
-1. **Check bot status**:
-   ```bash
-   ./monitor.sh
-   ```
-
-2. **View logs**:
-   ```bash
-   docker-compose logs -f discord-bot
-   ```
-
-3. **Test the bot** in your Discord server
-
-## Docker Deployment
-
-### Using Docker Compose (Recommended)
-
-```bash
-# Build and start
-docker-compose up -d
-
-# View logs
-docker-compose logs -f discord-bot
-
-# Stop
-docker-compose down
-```
-
-### Using Docker directly
-
-```bash
-# Build image
-docker build -t discord-spam-bot .
-
-# Run container
-docker run -d \
-  --name discord-bot \
-  --restart unless-stopped \
-  -v $(pwd)/data:/app/data \
-  -v $(pwd)/logs:/app/logs \
-  --env-file .env \
-  discord-spam-bot
-```
+- `!setadmin #channel` - Set the admin channel for spam notifications
+- `!retrain` - Retrain the spam detection model
+- `!toggle_approval` - Toggle between automatic deletion and admin approval
+- `!status` - Show bot status and configuration
+- `!flag [reason]` - Reply to a message to flag it as spam (admin only)
 
 ## Configuration
 
-### Environment Variables
+### Similarity Threshold
+- Default: 0.75 (75% similarity required)
+- Lower values = more sensitive detection
+- Higher values = less sensitive detection
 
-Create a `.env` file with the following variables:
+### K Neighbors
+- Default: 3
+- Number of nearest neighbors to consider
+- Higher values = more robust but slower
 
-```env
-# Discord Bot Configuration
-DISCORD_TOKEN=your_discord_bot_token_here
+### Admin Approval
+- Default: Enabled
+- When enabled, detected spam is sent to admin channel for approval
+- When disabled, spam is deleted automatically
 
-# Dataset Configuration
-DATASET_FILE=data/global_dataset.csv
-REJECTED_DATASET_FILE=data/rejected_dataset.csv
-CONFIG_PATH=data/server_config.json
+## Datasets
 
-# Bot Configuration
-COMMAND_PREFIX=!
-FLAG_COMMAND=!flag
-```
+### Internal Dataset (`spam_dataset.csv`)
+Contains messages flagged as spam by administrators:
+- Message content
+- Timestamp
+- Channel ID
+- Server ID
+- Deletion timestamp
 
-### Bot Commands
+### External Dataset
+Automatically loaded from Hugging Face:
+- Source: `wangyuancheng/discord-phishing-scam-clean`
+- Contains thousands of known scam messages
+- Used to improve initial detection before internal data is available
 
-| Command | Description | Permission |
-|---------|-------------|------------|
-| `!setadmin #channel` | Set admin channel for approvals | Administrator |
-| `!load_dataset` | Reload training datasets | Administrator |
-| `!toggle_approval` | Toggle admin approval requirement | Administrator |
-| `!status` | Show bot status and statistics | Administrator |
+The bot combines both datasets for training, improving detection accuracy over time as more messages are flagged internally.
 
-### Flagging Messages
+## Technical Details
 
-Reply to any message with `!flag [reason]` to flag it for deletion (requires administrator permissions).
+- **Embedding Model**: `all-MiniLM-L6-v2` (fast and effective for text similarity)
+- **Classification**: Nearest Neighbors with cosine similarity
+- **Training Data**: Internal flagged messages + external scam dataset
+- **Storage**: CSV files for datasets and JSON for server configurations
+- **Logging**: Comprehensive logging to `bot.log`
 
-## Monitoring and Maintenance
+## Security Notes
 
-### Useful Commands
-
-```bash
-# Check bot status
-./monitor.sh
-
-# View real-time logs
-docker-compose logs -f discord-bot
-
-# Create backup
-./backup.sh
-
-# Update bot
-./update.sh
-
-# Restart bot
-docker-compose restart discord-bot
-```
-
-### Systemd Service
-
-The bot runs as a systemd service for automatic startup:
-
-```bash
-# Enable auto-start
-sudo systemctl enable discord-bot
-
-# Start service
-sudo systemctl start discord-bot
-
-# Check status
-sudo systemctl status discord-bot
-
-# View logs
-sudo journalctl -u discord-bot -f
-```
-
-## Performance
-
-- **Content Detection**: ~5-20ms per message (depending on dataset size)
-- **Memory Usage**: ~500MB-1GB (depending on dataset size)
-- **CPU Usage**: Low during normal operation, spikes during training
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Bot not responding**:
-   ```bash
-   docker-compose logs discord-bot
-   ```
-
-2. **Permission errors**:
-   ```bash
-   sudo chown -R $USER:$USER data/
-   ```
-
-3. **Out of memory**:
-   - Increase EC2 instance size
-   - Reduce dataset size or use sampling
-
-4. **Discord API errors**:
-   - Check bot token in `.env`
-   - Verify bot permissions in Discord
-
-### Logs
-
-- **Application logs**: `docker-compose logs discord-bot`
-- **System logs**: `sudo journalctl -u discord-bot`
-- **Docker logs**: `docker logs discord-spam-bot`
-
-## Security Considerations
-
-- **Bot Token**: Never commit your Discord bot token to version control
-- **Firewall**: Configure security groups to only allow necessary ports
-- **Updates**: Regularly update the bot and dependencies
-- **Backups**: Use the provided backup script regularly
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test thoroughly
-5. Submit a pull request
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
+- Only administrators can flag messages as spam
+- Admin approval system prevents false positives
+- All flagged messages are logged for audit purposes
+- Bot permissions should be limited to message management only
+- External dataset is from a trusted source (Hugging Face)

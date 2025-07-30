@@ -30,8 +30,7 @@ load_dotenv()
 
 # Bot configuration
 TOKEN = os.getenv('DISCORD_TOKEN')
-DATASET_FILE = os.getenv('DATASET_FILE', 'global_dataset.csv')
-REJECTED_DATASET_FILE = os.getenv('REJECTED_DATASET_FILE', 'rejected_dataset.csv')
+DATASET_FILE = os.getenv('DATASET_FILE', 'spam_dataset.csv')
 COMMAND_PREFIX = os.getenv('COMMAND_PREFIX', '!')
 FLAG_COMMAND = os.getenv('FLAG_COMMAND', '!flag')
 CONFIG_PATH = os.getenv('CONFIG_PATH', 'server_config.json')
@@ -98,28 +97,26 @@ class ServerConfig:
 class MessageFilter:
     def __init__(self):
         self.dataset: Optional[pd.DataFrame] = None
-        self.rejected_dataset: Optional[pd.DataFrame] = None
         self.external_dataset: Optional[pd.DataFrame] = None
         self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
         self.nearest_neighbor_model = None
-        self.similarity_threshold = 0.8
-        self.k_neighbors = 5
+        self.similarity_threshold = 0.75  # Lower threshold for more sensitive detection
+        self.k_neighbors = 3
         self.trained = False
-        self.last_training_size = 0
-        self.training_threshold = 10
         self._training_texts = []
         self._training_embeddings = None
 
     def load_external_dataset(self):
         """Load the external phishing/scam dataset."""
         try:
-            logger.info("Loading external dataset...")
+            logger.info("Loading external dataset from Hugging Face...")
             response = requests.get(EXTERNAL_DATASET_URL, timeout=30)
             response.raise_for_status()
             
             self.external_dataset = pd.read_csv(StringIO(response.text))
             scam_count = len(self.external_dataset[self.external_dataset['label'] == 1])
-            logger.info(f"External dataset loaded: {scam_count} scam messages")
+            total_count = len(self.external_dataset)
+            logger.info(f"External dataset loaded: {scam_count} scam messages out of {total_count} total messages")
             
         except Exception as e:
             logger.error(f"Error loading external dataset: {e}")
@@ -131,51 +128,30 @@ class MessageFilter:
         try:
             if os.path.exists(DATASET_FILE):
                 self.dataset = pd.read_csv(DATASET_FILE)
-                logger.info(f"Main dataset loaded: {len(self.dataset)} entries")
+                logger.info(f"Spam dataset loaded: {len(self.dataset)} entries")
             else:
                 self.dataset = pd.DataFrame(columns=[
-                    'content', 'timestamp', 'channel_id', 'server_id', 'status', 'deletion_timestamp'
+                    'content', 'timestamp', 'channel_id', 'server_id', 'deletion_timestamp'
                 ])
                 self.save_dataset()
+                logger.info("Created new spam dataset")
         except Exception as e:
-            logger.error(f"Error loading main dataset: {e}")
+            logger.error(f"Error loading dataset: {e}")
             self.dataset = None
-
-        # Load rejected dataset
-        try:
-            if os.path.exists(REJECTED_DATASET_FILE):
-                self.rejected_dataset = pd.read_csv(REJECTED_DATASET_FILE)
-                logger.info(f"Rejected dataset loaded: {len(self.rejected_dataset)} entries")
-            else:
-                self.rejected_dataset = pd.DataFrame(columns=[
-                    'content', 'timestamp', 'channel_id', 'server_id', 'status', 'rejection_timestamp'
-                ])
-                self.save_rejected_dataset()
-        except Exception as e:
-            logger.error(f"Error loading rejected dataset: {e}")
-            self.rejected_dataset = None
 
         # Load external dataset
         self.load_external_dataset()
 
     def save_dataset(self):
-        """Save the main dataset."""
+        """Save the spam dataset."""
         if self.dataset is not None:
             try:
                 self.dataset.to_csv(DATASET_FILE, index=False)
             except Exception as e:
-                logger.error(f"Error saving main dataset: {e}")
+                logger.error(f"Error saving dataset: {e}")
 
-    def save_rejected_dataset(self):
-        """Save the rejected dataset."""
-        if self.rejected_dataset is not None:
-            try:
-                self.rejected_dataset.to_csv(REJECTED_DATASET_FILE, index=False)
-            except Exception as e:
-                logger.error(f"Error saving rejected dataset: {e}")
-
-    def add_message(self, message: discord.Message, status: str = "deleted"):
-        """Add a deleted message to the dataset."""
+    def add_spam_message(self, message: discord.Message):
+        """Add a spam message to the dataset."""
         if self.dataset is None:
             self.load_dataset()
         
@@ -185,66 +161,46 @@ class MessageFilter:
                 'timestamp': message.created_at.isoformat(),
                 'channel_id': message.channel.id,
                 'server_id': message.guild.id,
-                'status': status,
                 'deletion_timestamp': datetime.now(timezone.utc).isoformat()
             }
             self.dataset = pd.concat([self.dataset, pd.DataFrame([new_entry])], ignore_index=True)
             self.save_dataset()
-            self.train_from_dataset()
-
-    def add_rejected_message(self, message: discord.Message):
-        """Add a rejected message to the rejected dataset."""
-        if self.rejected_dataset is None:
-            self.load_dataset()
-        
-        if self.rejected_dataset is not None:
-            new_entry = {
-                'content': message.content,
-                'timestamp': message.created_at.isoformat(),
-                'channel_id': message.channel.id,
-                'server_id': message.guild.id,
-                'status': 'rejected',
-                'rejection_timestamp': datetime.now(timezone.utc).isoformat()
-            }
-            self.rejected_dataset = pd.concat([self.rejected_dataset, pd.DataFrame([new_entry])], ignore_index=True)
-            self.save_rejected_dataset()
+            self.train_model()
 
     def _prepare_training_data(self):
-        """Prepare training data from both datasets."""
-        # Get deleted messages from main dataset
-        deleted_messages = self.dataset[self.dataset['status'] == 'deleted'] if self.dataset is not None else pd.DataFrame()
-        internal_texts = deleted_messages['content'].astype(str).tolist() if len(deleted_messages) > 0 else []
+        """Prepare training data from both internal and external datasets."""
+        training_texts = []
         
-        # Get scam messages from external dataset
-        external_scam_texts = []
+        # Get spam messages from internal dataset
+        if self.dataset is not None and len(self.dataset) > 0:
+            internal_texts = self.dataset['content'].astype(str).tolist()
+            training_texts.extend(internal_texts)
+            logger.info(f"Added {len(internal_texts)} internal spam messages to training data")
+        
+        # Get scam messages from external dataset (label == 1)
         if self.external_dataset is not None:
             scam_messages = self.external_dataset[self.external_dataset['label'] == 1]
             external_scam_texts = scam_messages['msg_content'].astype(str).tolist()
+            training_texts.extend(external_scam_texts)
+            logger.info(f"Added {len(external_scam_texts)} external scam messages to training data")
         
-        return internal_texts + external_scam_texts
+        return training_texts
 
-    def train_from_dataset(self, force: bool = False):
-        """Train the nearest neighbor model."""
-        if self.dataset is None or self.dataset.empty:
+    def train_model(self):
+        """Train the nearest neighbor model on spam messages."""
+        training_texts = self._prepare_training_data()
+        
+        if len(training_texts) < 2:
+            logger.warning("Not enough spam messages to train model")
             return
 
-        current_size = len(self.dataset)
-        if not force and self.trained and (current_size - self.last_training_size) < self.training_threshold:
-            return
-
-        logger.info("Training nearest neighbor model...")
-        
         try:
-            training_texts = self._prepare_training_data()
+            logger.info(f"Training nearest neighbor model on {len(training_texts)} spam messages...")
             
-            if len(training_texts) < 2:
-                logger.warning("Not enough training data")
-                return
-
             # Calculate embeddings
             embeddings = self.embedding_model.encode(training_texts)
             
-            # Train model
+            # Train nearest neighbor model
             self.nearest_neighbor_model = NearestNeighbors(
                 n_neighbors=min(self.k_neighbors, len(embeddings)),
                 metric='cosine',
@@ -252,62 +208,47 @@ class MessageFilter:
             )
             self.nearest_neighbor_model.fit(embeddings)
             
-            # Calculate threshold
-            similarities = np.dot(embeddings, embeddings.T)
-            np.fill_diagonal(similarities, 0)
-            self.similarity_threshold = np.percentile(similarities.flatten(), 75)
-            
-            # Cache training data for faster inference
+            # Cache training data
             self._training_texts = training_texts
             self._training_embeddings = embeddings
             
             self.trained = True
-            self.last_training_size = current_size
-            logger.info(f"Training completed: {len(training_texts)} samples")
+            logger.info(f"Model trained successfully on {len(training_texts)} samples")
             
         except Exception as e:
-            logger.error(f"Training error: {e}")
+            logger.error(f"Error training model: {e}")
+            self.trained = False
 
-    def find_matches(self, message: discord.Message) -> List[Tuple[Dict, float]]:
-        """Find matching messages using nearest neighbor classification."""
+    def is_spam(self, message: discord.Message) -> Tuple[bool, float, Optional[str]]:
+        """Check if a message is spam using nearest neighbor classification."""
         if not self.trained or self.nearest_neighbor_model is None:
-            self.train_from_dataset()
+            self.train_model()
             if not self.trained:
-                return []
+                return False, 0.0, None
 
         try:
-            # Encode message
+            # Encode the message
             message_embedding = self.embedding_model.encode([message.content])
             
             # Find nearest neighbors
             distances, indices = self.nearest_neighbor_model.kneighbors(message_embedding)
             
-            matches = []
-            for distance, idx in zip(distances[0], indices[0]):
-                similarity = 1 - distance
-                
-                if similarity > self.similarity_threshold:
-                    # Determine source and create match object
-                    if idx < len(self._training_texts) - (len(self.external_dataset[self.external_dataset['label'] == 1]) if self.external_dataset is not None else 0):
-                        # Internal dataset match
-                        deleted_messages = self.dataset[self.dataset['status'] == 'deleted']
-                        matched_message = deleted_messages.iloc[idx].to_dict()
-                        matched_message['source'] = 'internal'
-                    else:
-                        # External dataset match
-                        matched_message = {
-                            'content': self._training_texts[idx],
-                            'source': 'external',
-                            'label': 1
-                        }
-                    
-                    matches.append((matched_message, similarity))
+            # Calculate similarity scores
+            similarities = 1 - distances[0]
             
-            return sorted(matches, key=lambda x: x[1], reverse=True)
+            # Check if any neighbor is similar enough
+            max_similarity = max(similarities)
+            if max_similarity > self.similarity_threshold:
+                # Find the most similar spam message
+                best_match_idx = indices[0][np.argmax(similarities)]
+                best_match_text = self._training_texts[best_match_idx]
+                return True, max_similarity, best_match_text
+            
+            return False, max_similarity, None
             
         except Exception as e:
-            logger.error(f"Error in matching: {e}")
-            return []
+            logger.error(f"Error checking spam: {e}")
+            return False, 0.0, None
 
 # Initialize components
 message_filter = MessageFilter()
@@ -317,11 +258,8 @@ server_config = ServerConfig()
 async def on_ready():
     """Called when the bot is ready."""
     logger.info(f'{bot.user} has connected to Discord!')
-    try:
-        synced = await bot.tree.sync()
-        logger.info(f"Synced {len(synced)} command(s)")
-    except Exception as e:
-        logger.error(f"Failed to sync commands: {e}")
+    message_filter.load_dataset()
+    message_filter.train_model()
 
 @bot.event
 async def on_guild_join(guild: discord.Guild):
@@ -330,7 +268,6 @@ async def on_guild_join(guild: discord.Guild):
     if str(guild.id) not in server_config.config:
         server_config.config[str(guild.id)] = {'requires_approval': True}
         server_config.save_config()
-    message_filter.load_dataset()
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -367,8 +304,8 @@ async def on_message(message: discord.Message):
                     if interaction.user.guild_permissions.administrator:
                         try:
                             await target_message.delete()
-                            message_filter.add_message(target_message)
-                            await interaction.response.send_message("Message deleted successfully.", ephemeral=True)
+                            message_filter.add_spam_message(target_message)
+                            await interaction.response.send_message("Message deleted and added to spam dataset.", ephemeral=True)
                             await message.delete()
                         except Exception as e:
                             await interaction.response.send_message(f"Error deleting message: {e}", ephemeral=True)
@@ -396,22 +333,18 @@ async def on_message(message: discord.Message):
                 await message.channel.send(embed=embed, view=view)
                 return
 
-    # Check for content-based matches
-    matches = message_filter.find_matches(message)
-    if matches:
-        match, similarity = matches[0]
-        
+    # Check for spam using nearest neighbor
+    is_spam, similarity, matched_text = message_filter.is_spam(message)
+    
+    if is_spam:
         if server_config.get_requires_approval(message.guild.id):
             admin_channel_id = server_config.get_admin_channel(message.guild.id)
             if admin_channel_id:
                 admin_channel = bot.get_channel(admin_channel_id)
                 if admin_channel:
-                    match_source = match.get('source', 'internal') if isinstance(match, dict) else 'internal'
-                    source_display = "External Dataset" if match_source == 'external' else "Internal Dataset"
-                    
                     embed = discord.Embed(
                         title="Potential Spam Detected",
-                        description="A message similar to previously deleted content was found.",
+                        description="A message similar to known spam was detected.",
                         color=discord.Color.yellow()
                     )
                     embed.add_field(name="Author", value=message.author.mention)
@@ -419,29 +352,29 @@ async def on_message(message: discord.Message):
                     embed.add_field(name="Content", value=message.content)
                     embed.add_field(name="Message Link", value=message.jump_url)
                     embed.add_field(name="Similarity Score", value=f"{similarity:.3f}")
-                    embed.add_field(name="Match Source", value=source_display)
+                    if matched_text:
+                        embed.add_field(name="Matched Spam", value=matched_text[:100] + "..." if len(matched_text) > 100 else matched_text)
 
                     view = discord.ui.View()
-                    approve_button = discord.ui.Button(label="Approve", style=discord.ButtonStyle.green)
-                    reject_button = discord.ui.Button(label="Reject", style=discord.ButtonStyle.red)
+                    approve_button = discord.ui.Button(label="Delete as Spam", style=discord.ButtonStyle.danger)
+                    reject_button = discord.ui.Button(label="Allow Message", style=discord.ButtonStyle.green)
 
                     async def approve_callback(interaction: discord.Interaction):
                         if interaction.user.guild_permissions.administrator:
                             try:
                                 await message.delete()
-                                message_filter.add_message(message)
-                                await interaction.response.send_message("Message deleted successfully.", ephemeral=True)
+                                message_filter.add_spam_message(message)
+                                await interaction.response.send_message("Message deleted and added to spam dataset.", ephemeral=True)
                             except Exception as e:
                                 await interaction.response.send_message(f"Error deleting message: {e}", ephemeral=True)
                         else:
-                            await interaction.response.send_message("You don't have permission to approve deletions.", ephemeral=True)
+                            await interaction.response.send_message("You don't have permission to delete messages.", ephemeral=True)
 
                     async def reject_callback(interaction: discord.Interaction):
                         if interaction.user.guild_permissions.administrator:
-                            message_filter.add_rejected_message(message)
-                            await interaction.response.send_message("Deletion rejected.", ephemeral=True)
+                            await interaction.response.send_message("Message allowed to remain.", ephemeral=True)
                         else:
-                            await interaction.response.send_message("You don't have permission to reject deletions.", ephemeral=True)
+                            await interaction.response.send_message("You don't have permission to allow messages.", ephemeral=True)
 
                     approve_button.callback = approve_callback
                     reject_button.callback = reject_callback
@@ -452,10 +385,10 @@ async def on_message(message: discord.Message):
         else:
             try:
                 await message.delete()
-                message_filter.add_message(message)
-                logger.info(f"Deleted message from {message.author} (similarity: {similarity:.3f})")
+                message_filter.add_spam_message(message)
+                logger.info(f"Deleted spam message from {message.author} (similarity: {similarity:.3f})")
             except Exception as e:
-                logger.error(f"Error deleting message: {e}")
+                logger.error(f"Error deleting spam message: {e}")
 
 @bot.command(name='setadmin')
 @commands.has_permissions(administrator=True)
@@ -464,12 +397,12 @@ async def set_admin_channel(ctx, channel: discord.TextChannel):
     server_config.set_admin_channel(ctx.guild.id, channel.id)
     await ctx.send(f"Admin channel set to {channel.mention}")
 
-@bot.command(name='load_dataset')
+@bot.command(name='retrain')
 @commands.has_permissions(administrator=True)
-async def load_dataset(ctx):
-    """Reload the message dataset."""
-    message_filter.load_dataset()
-    await ctx.send("Dataset reloaded successfully.")
+async def retrain_model(ctx):
+    """Retrain the spam detection model."""
+    message_filter.train_model()
+    await ctx.send("Spam detection model retrained successfully.")
 
 @bot.command(name='toggle_approval')
 @commands.has_permissions(administrator=True)
@@ -487,20 +420,21 @@ async def status(ctx):
     admin_channel_id = server_config.get_admin_channel(ctx.guild.id)
     admin_channel = f"<#{admin_channel_id}>" if admin_channel_id else "Not set"
     
-    main_size = len(message_filter.dataset) if message_filter.dataset is not None else 0
-    rejected_size = len(message_filter.rejected_dataset) if message_filter.rejected_dataset is not None else 0
+    dataset_size = len(message_filter.dataset) if message_filter.dataset is not None else 0
     external_size = len(message_filter.external_dataset) if message_filter.external_dataset is not None else 0
+    external_scam_count = len(message_filter.external_dataset[message_filter.external_dataset['label'] == 1]) if message_filter.external_dataset is not None else 0
     
-    embed = discord.Embed(title="Bot Status", color=discord.Color.blue())
+    embed = discord.Embed(title="Spam Detection Bot Status", color=discord.Color.blue())
     embed.add_field(name="Admin Approval", value="Enabled" if server_config.get_requires_approval(ctx.guild.id) else "Disabled")
-    embed.add_field(name="Main Dataset Size", value=main_size)
-    embed.add_field(name="Rejected Dataset Size", value=rejected_size)
+    embed.add_field(name="Internal Dataset Size", value=dataset_size)
     embed.add_field(name="External Dataset Size", value=external_size)
+    embed.add_field(name="External Scam Messages", value=external_scam_count)
     embed.add_field(name="Admin Channel", value=admin_channel)
-    embed.add_field(name="Detection Method", value="Content-based (Nearest Neighbor)")
+    embed.add_field(name="Detection Method", value="Nearest Neighbor (Content-based)")
     embed.add_field(name="Similarity Threshold", value=f"{message_filter.similarity_threshold:.3f}")
     embed.add_field(name="K Neighbors", value=message_filter.k_neighbors)
-    embed.add_field(name="Flag Command", value=f"Reply to a message with `{FLAG_COMMAND} [reason]` to flag it for deletion")
+    embed.add_field(name="Model Trained", value="Yes" if message_filter.trained else "No")
+    embed.add_field(name="Flag Command", value=f"Reply to a message with `{FLAG_COMMAND} [reason]` to flag it as spam")
     await ctx.send(embed=embed)
 
 # Run the bot
